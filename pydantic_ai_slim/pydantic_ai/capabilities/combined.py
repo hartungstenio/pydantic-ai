@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from pydantic import ValidationError
 
 from pydantic_ai import _system_prompt
@@ -50,7 +50,15 @@ class CombinedCapability(AbstractCapability[AgentDepsT]):
         return any(c.has_wrap_run_event_stream for c in self.capabilities)
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
-        new_caps = await asyncio.gather(*(c.for_run(ctx) for c in self.capabilities))
+        new_caps: list[AbstractCapability[AgentDepsT]] = [None] * len(self.capabilities)  # type: ignore[list-item]
+
+        async def run_single(idx: int, c: AbstractCapability[AgentDepsT]) -> None:
+            new_caps[idx] = await c.for_run(ctx)
+
+        async with anyio.create_task_group() as tg:
+            for i, c in enumerate(self.capabilities):
+                tg.start_soon(run_single, i, c)
+
         if all(new is old for new, old in zip(new_caps, self.capabilities)):
             return self
         return replace(self, capabilities=list(new_caps))

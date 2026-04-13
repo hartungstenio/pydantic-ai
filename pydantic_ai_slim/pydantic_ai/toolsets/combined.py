@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+import anyio
 from typing_extensions import Self
 
 from .._run_context import AgentDepsT, RunContext
@@ -64,7 +64,15 @@ class CombinedToolset(AbstractToolset[AgentDepsT]):
             self._exit_stack = None
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
-        toolsets_tools = await asyncio.gather(*(toolset.get_tools(ctx) for toolset in self.toolsets))
+        toolsets_tools: list[dict[str, ToolsetTool[AgentDepsT]]] = [None] * len(self.toolsets)  # type: ignore[list-item]
+
+        async def collect_tools(idx: int, toolset: AbstractToolset[AgentDepsT]) -> None:
+            toolsets_tools[idx] = await toolset.get_tools(ctx)
+
+        async with anyio.create_task_group() as tg:
+            for i, toolset in enumerate(self.toolsets):
+                tg.start_soon(collect_tools, i, toolset)
+
         all_tools: dict[str, ToolsetTool[AgentDepsT]] = {}
 
         for toolset, tools in zip(self.toolsets, toolsets_tools):
@@ -103,7 +111,15 @@ class CombinedToolset(AbstractToolset[AgentDepsT]):
         return replace(self, toolsets=[toolset.visit_and_replace(visitor) for toolset in self.toolsets])
 
     async def get_instructions(self, ctx: RunContext[AgentDepsT]) -> list[str | InstructionPart] | None:
-        results = await asyncio.gather(*(ts.get_instructions(ctx) for ts in self.toolsets))
+        results: list[str | InstructionPart | Sequence[str | InstructionPart] | None] = [None] * len(self.toolsets)
+
+        async def collect_instructions(idx: int, toolset: AbstractToolset[AgentDepsT]) -> None:
+            results[idx] = await toolset.get_instructions(ctx)
+
+        async with anyio.create_task_group() as tg:
+            for i, toolset in enumerate(self.toolsets):
+                tg.start_soon(collect_instructions, i, toolset)
+
         parts: list[str | InstructionPart] = []
         for r in results:
             if r is not None:
